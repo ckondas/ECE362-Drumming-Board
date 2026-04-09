@@ -6,11 +6,11 @@
 #include <math.h>   
 
 /****************************************** */
-#define PIN_SDI    x
-#define PIN_CS     x
-#define PIN_SCK    x
-#define PIN_DC     x
-#define PIN_nRESET x
+#define PIN_SDI    35
+#define PIN_CS     33
+#define PIN_SCK    34
+#define PIN_DC     27
+#define PIN_nRESET 28
 
 // Uncomment the following #define when 
 // you are ready to run Step 3.
@@ -19,7 +19,7 @@
 // long time as it compiles and uploads 
 // all the image frames into the uploaded 
 // binary!  Expect to wait 5 minutes.
-#define ANIMATION
+// #define ANIMATION
 
 /****************************************** */
 #ifdef ANIMATION
@@ -43,8 +43,8 @@ void init_spi_lcd() {
     // initialize SPI1 with 48 MHz clock
     gpio_set_function(PIN_SCK, GPIO_FUNC_SPI);
     gpio_set_function(PIN_SDI, GPIO_FUNC_SPI);
-    spi_init(spi1, 100 * 1000 * 1000);
-    spi_set_format(spi1, 8, SPI_CPOL_0, SPI_CPHA_0, SPI_MSB_FIRST);
+    spi_init(spi0, 12 * 1000 * 1000);
+    spi_set_format(spi0, 8, SPI_CPOL_0, SPI_CPHA_0, SPI_MSB_FIRST);
 }
 
 Picture* load_image(const char* image_data);
