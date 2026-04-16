@@ -8,7 +8,7 @@
 #include "music_board.h"
 #include "keypad.h"
 // #include "display.h"   // Chris
-// #include "audio.h"     // Julia
+#include "audio.h"     // Julia
 // #include "mic.h"       // Geetika
  
 static shared_state_t shared_state;
@@ -23,10 +23,17 @@ void core1_audio_main(void) {
     // 3. If system_mode == MODE_PLAYING, iterate through loop_data
     // 4. Mix multiple layers if overdub
     //
-    // audio_init();
-    // while (true) {
-    //     audio_update(&shared_state);
-    // }
+    audio_init();
+    while (true) {
+        if (shared_state.current_note == NOTE_NONE) {
+            set_freq(0, 0.0f);
+        } 
+        else {
+            set_freq(0, note_freq[shared_state.current_note]);
+        }
+
+        sleep_ms(1);
+    }
 }
  
 // CORE 0 FOR EVERYONE ELSE
