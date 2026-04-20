@@ -280,7 +280,8 @@ void LCD_Init(void (*reset)(int), void (*select)(int), void (*reg_select)(int))
     sleep_ms(120); // Wait 120 ms
     LCD_WR_REG(0x29);     // Display on
 
-    LCD_direction(USE_HORIZONTAL);
+    // LCD_direction(USE_HORIZONTAL);
+    LCD_direction(3);
     lcddev.select(0);
 }
 
@@ -805,50 +806,82 @@ const unsigned char asc2_1608[95][16]={
 // size is the height of the character (either 12 or 16)
 // When mode is set, the background will be transparent.
 //===========================================================================
-void _LCD_DrawChar(u16 x,u16 y,u16 fc, u16 bc, char num, u8 size, u8 mode)
+void _LCD_DrawChar(u16 x,u16 y,u16 fc, u16 bc, char num, u8 size, u8 mode, u8 scale)
 {
     u8 temp;
     u8 pos,t;
-    num=num-' ';
-    LCD_SetWindow(x,y,x+size/2-1,y+size-1);
-    if (!mode) {
-        LCD_WriteData16_Prepare();
-        for(pos=0;pos<size;pos++) {
-            if (size==12)
-                temp=asc2_1206[(int)num][pos];
-            else
-                temp=asc2_1608[(int)num][pos];
-            for (t=0;t<size/2;t++) {
-                if (temp&0x01)
-                    LCD_WriteData16(fc);
-                else
-                    LCD_WriteData16(bc);
-                temp>>=1;
+    num = num - ' ';
 
-            }
-        }
-        LCD_WriteData16_End();
-    } else {
-        for(pos=0;pos<size;pos++)
+    for(pos = 0; pos < size; pos++)
+    {
+        if (size == 12)
+            temp = asc2_1206[(int)num][pos];
+        else
+            temp = asc2_1608[(int)num][pos];
+
+        for(t = 0; t < size/2; t++)
         {
-            if (size==12)
-                temp=asc2_1206[(int)num][pos];
-            else
-                temp=asc2_1608[(int)num][pos];
-            for (t=0;t<size/2;t++)
+            u16 color = (temp & 0x01) ? fc : bc;
+            
+            // Scale
+            for (u8 dy = 0; dy < scale; dy++)
             {
-                if(temp&0x01)
-                    _LCD_DrawPoint(x+t,y+pos,fc);
-                temp>>=1;
+                for (u8 dx = 0; dx < scale; dx++)
+                {
+                    if (mode) {
+                        if (temp & 0x01)
+                            _LCD_DrawPoint(x + t*scale + dx, y + pos*scale + dy, fc);
+                    } else {
+                        _LCD_DrawPoint(x + t*scale + dx, y + pos*scale + dy, color);
+                    }
+                }
             }
+
+            temp >>= 1;
         }
     }
+    // u8 temp;
+    // u8 pos,t;
+    // num=num-' ';
+    // LCD_SetWindow(x,y,x+size/2-1,y+size-1);
+    // if (!mode) {
+    //     LCD_WriteData16_Prepare();
+    //     for(pos=0;pos<size;pos++) {
+    //         if (size==12)
+    //             temp=asc2_1206[(int)num][pos];
+    //         else
+    //             temp=asc2_1608[(int)num][pos];
+    //         for (t=0;t<size/2;t++) {
+    //             if (temp&0x01)
+    //                 LCD_WriteData16(fc);
+    //             else
+    //                 LCD_WriteData16(bc);
+    //             temp>>=1;
+
+    //         }
+    //     }
+    //     LCD_WriteData16_End();
+    // } else {
+    //     for(pos=0;pos<size;pos++)
+    //     {
+    //         if (size==12)
+    //             temp=asc2_1206[(int)num][pos];
+    //         else
+    //             temp=asc2_1608[(int)num][pos];
+    //         for (t=0;t<size/2;t++)
+    //         {
+    //             if(temp&0x01)
+    //                 _LCD_DrawPoint(x+t,y+pos,fc);
+    //             temp>>=1;
+    //         }
+    //     }
+    // }
 }
 
 void LCD_DrawChar(u16 x,u16 y,u16 fc, u16 bc, char num, u8 size, u8 mode)
 {
     lcddev.select(1);
-    _LCD_DrawChar(x,y,fc,bc,num,size,mode);
+    _LCD_DrawChar(x,y,fc,bc,num,size,mode, 1);
     lcddev.select(0);
 }
 
@@ -859,15 +892,15 @@ void LCD_DrawChar(u16 x,u16 y,u16 fc, u16 bc, char num, u8 size, u8 mode)
 // size is the height of the character (either 12 or 16)
 // When mode is set, the background will be transparent.
 //===========================================================================
-void LCD_DrawString(u16 x,u16 y, u16 fc, u16 bg, const char *p, u8 size, u8 mode)
+void LCD_DrawString(u16 x,u16 y, u16 fc, u16 bg, const char *p, u8 size, u8 mode, u8 scale)
 {
     lcddev.select(1);
     while((*p<='~')&&(*p>=' '))
     {
         if(x>(lcddev.width-1)||y>(lcddev.height-1))
         return;
-        _LCD_DrawChar(x,y,fc,bg,*p,size,mode);
-        x+=size/2;
+        _LCD_DrawChar(x,y,fc,bg,*p,size,mode, scale);
+        x+= (size/2) * scale;
         p++;
     }
     lcddev.select(0);
