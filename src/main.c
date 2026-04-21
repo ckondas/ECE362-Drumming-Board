@@ -2,16 +2,19 @@
 // Core 1: PWM audio output (Julia) (audio can't tolerate jitter, so this way it won't have any interruptions)
  
 #include <stdio.h>
+#include <string.h>
+#include <math.h>
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
 #include "hardware/sync.h"
+#include "hardware/spi.h"
 #include "music_board.h"
 #include "keypad.h"
-// #include "display.h"   // Chris
-#include "audio.h"     // Julia
+#include "lcd.h"   // Chris
+// #include "audio.h"     // Julia
 // #include "mic.h"       // Geetika
  
-shared_state_t shared_state;
+static shared_state_t shared_state;
  
 // CORE 1 FOR JULIA
  
@@ -23,17 +26,10 @@ void core1_audio_main(void) {
     // 3. If system_mode == MODE_PLAYING, iterate through loop_data
     // 4. Mix multiple layers if overdub
     //
-    audio_init();
-    while (true) {
-        if (shared_state.current_note == NOTE_NONE) {
-            set_freq(0, 0.0f);
-        } 
-        else {
-            set_freq(0, note_freq[shared_state.current_note]);
-        }
-
-        sleep_ms(1);
-    }
+    // audio_init();
+    // while (true) {
+    //     audio_update(&shared_state);
+    // }
 }
  
 // CORE 0 FOR EVERYONE ELSE
@@ -60,7 +56,9 @@ int main(void) {
     }
  
     // Chris: LCD
-    // display_init();
+    init_spi_lcd();
+    LCD_Setup();
+    LCD_Clear(BLACK);
  
     // Geetika: Mic
     // mic_init();
@@ -72,7 +70,7 @@ int main(void) {
         keypad_poll(&shared_state);
  
         // Chris: update display based on shared_state
-        // display_update(&shared_state);
+        display_update(&shared_state);
  
         // Geetika: if recording mic, sample ADC
         // if (shared_state.system_mode == MODE_RECORDING) {
