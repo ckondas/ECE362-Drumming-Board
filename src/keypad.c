@@ -91,6 +91,8 @@ static inline uint8_t seesaw_to_key(uint8_t s) {
 #define COLOR_YELLOW        COLOR_RGB(36, 36, 0)
 #define COLOR_DIM_YELLOW    COLOR_RGB(9,  9,  0)
 #define COLOR_DIM_GREEN_2   COLOR_RGB(0,  9,  0)
+#define COLOR_MAGENTA       COLOR_RGB(36, 0,  36)
+#define COLOR_DIM_MAGENTA   COLOR_RGB(9,  0,  9)
 
 // -------------------------------------------------------------------
 // Module-local state
@@ -232,10 +234,10 @@ static void handle_key_press(uint8_t key, shared_state_t *state) {
 
     // Instrument-select
     if (in_instr) {
-        if (key == 0 || key == 1 || key == 2 || key == 3) {
-            // Keys 0..3 map to SINE, SQUARE, SAW, TRIANGLE
-            static const uint8_t wf[4] = {
-                WAVE_SINE, WAVE_SQUARE, WAVE_SAW, WAVE_TRIANGLE
+        if (key <= 4) {
+            // Keys 0..4 map to SINE, SQUARE, SAW, TRIANGLE, MIC
+            static const uint8_t wf[5] = {
+                WAVE_SINE, WAVE_SQUARE, WAVE_SAW, WAVE_TRIANGLE, WAVE_MIC
             };
             save = lock_acquire();
             state->current_waveform = wf[key];
@@ -261,7 +263,7 @@ static void handle_key_press(uint8_t key, shared_state_t *state) {
         save = lock_acquire();
         state->current_note = note;
         lock_release(save);
-        printf("%d\n", state->current_note);
+        printf("%d\n", note);
 
         last_pressed_note_key = key;
 
@@ -479,6 +481,7 @@ static uint32_t waveform_color(uint8_t wf) {
     case WAVE_SQUARE:   return COLOR_RED;
     case WAVE_SAW:      return COLOR_YELLOW;
     case WAVE_TRIANGLE: return COLOR_GREEN;
+    case WAVE_MIC:      return COLOR_MAGENTA;
     default:            return COLOR_WHITE;
     }
 }
@@ -493,14 +496,15 @@ static void update_leds(shared_state_t *state) {
     uint32_t target[NUM_KEYS];
 
     if (in_instr) {
-        static const uint32_t wf_bright[4] = {
-            COLOR_BLUE, COLOR_RED, COLOR_YELLOW, COLOR_GREEN
+        static const uint32_t wf_bright[5] = {
+            COLOR_BLUE, COLOR_RED, COLOR_YELLOW, COLOR_GREEN, COLOR_MAGENTA
         };
-        static const uint32_t wf_dim[4] = {
-            COLOR_DIM_BLUE, COLOR_DIM_RED, COLOR_DIM_YELLOW, COLOR_DIM_GREEN_2
+        static const uint32_t wf_dim[5] = {
+            COLOR_DIM_BLUE, COLOR_DIM_RED, COLOR_DIM_YELLOW,
+            COLOR_DIM_GREEN_2, COLOR_DIM_MAGENTA
         };
         for (int k = 0; k < NUM_KEYS; k++) target[k] = COLOR_OFF;
-        for (int k = 0; k < 4; k++) {
+        for (int k = 0; k < 5; k++) {
             target[k] = (wf == k) ? wf_bright[k] : wf_dim[k];
         }
         target[KEY_INSTRUMENT] = waveform_color(wf); 
