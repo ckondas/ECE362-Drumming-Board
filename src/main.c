@@ -27,9 +27,11 @@ void core1_audio_main(void) {
     while (true) {
         if (shared_state.current_note == NOTE_NONE) {
             set_freq(0, 0.0f);
+            // WavPwmPlayAudio(AudioBuffer);
         } 
         else {
-            set_freq(0, note_freq[shared_state.current_note]);
+            // set_freq(0, note_freq[shared_state.current_note]);
+            set_freq(0, 440.0f);
         }
 
         sleep_ms(1);

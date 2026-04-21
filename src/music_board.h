@@ -18,7 +18,7 @@
 // Microphone (Geetika)
 
 // Speaker (Julia)
-
+#define PIN_SPEAKER 36
 
 
 // NOTE DEFINITIONS
