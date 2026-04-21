@@ -6,10 +6,10 @@
 
 // Defined this in main.c
 #define N 1000 // Size of the wavetable
-extern wavetable_sine[N];
-extern wavetable_square[N];
-extern wavetable_saw[N];
-extern wavetable_triangle[N];
+extern short int wavetable_sine[N];
+extern short int wavetable_square[N];
+extern short int wavetable_saw[N];
+extern short int wavetable_triangle[N];
 
 #define RATE 20000
 
