@@ -41,14 +41,14 @@ void set_freq(int chan, float f) {
             step0 = 0;
             offset0 = 0;
         } else
-            step0 = (f * N / RATE) * (1<<16);
+            step0 = (f * N / RATE) * (1 << 16);
     }
     if (chan == 1) {
         if (f == 0.0) {
             step1 = 0;
             offset1 = 0;
         } else
-            step1 = (f * N / RATE) * (1<<16);
+            step1 = (f * N / RATE) * (1 << 16);
     }
 }
 
@@ -69,11 +69,11 @@ void pwm_audio_handler(){
     short int *current_table;
 
     switch (shared_state.current_waveform) {
-        case WAVE_SINE:     current_table = wavetable_sine; break;
-        case WAVE_SQUARE:   current_table = wavetable_square; break;
-        case WAVE_SAW:      current_table = wavetable_saw; break;
+        case WAVE_SINE: current_table = wavetable_sine; break;
+        case WAVE_SQUARE: current_table = wavetable_square; break;
+        case WAVE_SAW: current_table = wavetable_saw; break;
         case WAVE_TRIANGLE: current_table = wavetable_triangle; break;
-        default:            current_table = wavetable_sine; break;
+        default: current_table = wavetable_sine; break;
     }
 
     int samp = current_table[offset0 >> 16];

@@ -11,7 +11,7 @@
 #include "audio.h"     // Julia
 // #include "mic.h"       // Geetika
  
-static shared_state_t shared_state;
+shared_state_t shared_state;
  
 // CORE 1 FOR JULIA
  
