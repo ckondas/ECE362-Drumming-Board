@@ -14,10 +14,20 @@
 #define TRELLIS_ADDR      0x2E
 
 // TFT LCD (Chris)
+#define CS_NUM  29
+#define DC_NUM 27
+#define RESET_NUM 28
+#define PIN_SDI    31
+#define PIN_CS     29
+#define PIN_SCK    30
+#define PIN_DC     27
+#define PIN_nRESET 28
 
 // Microphone (Geetika)
+#define PIN_MIC_ADC 40
 
 // Speaker (Julia)
+#define PIN_SPEAKER 36
 
 
 
