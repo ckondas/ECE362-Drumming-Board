@@ -5,11 +5,17 @@
 #include "hardware/pwm.h"
 #include "hardware/irq.h"
 #include "audio.h"
+#include "music_board.h"
+
+extern shared_state_t shared_state;
 
 #define M_PI 3.14159265358979323846
 #define PIN_SPEAKER 36
 
-uint16_t wavetable[N];
+short int wavetable_sine[N];
+short int wavetable_square[N];
+short int wavetable_saw[N];
+short int wavetable_triangle[N];
 
 int step0 = 0;
 int offset0 = 0;
@@ -18,8 +24,15 @@ int offset1 = 0;
 int volume = 2400;
 
 void init_wavetable(void) {
-    for(int i=0; i < N; i++)
-        wavetable[i] = (16383 * sin(2 * M_PI * i / N)) + 16384;
+    for(int i=0; i < N; i++){
+        wavetable_sine[i] = (16383 * sin(2 * M_PI * i / N)) + 16384;
+        wavetable_square[i] = (i < N/2) ? 32767 : 0; 
+        wavetable_saw[i] = (i * 32767) / N;
+        if (i < N/2)
+            wavetable_triangle[i] = (i * 2 * 32767) / N;
+        else
+            wavetable_triangle[i] = ((N - i) * 2 * 32767) / N;
+    }
 }
 
 void set_freq(int chan, float f) {
@@ -53,7 +66,17 @@ void pwm_audio_handler(){
     if(offset1 >= N << 16)
         offset1 -= N << 16;
 
-    int samp = wavetable[offset0 >> 16] + wavetable[offset1 >> 16];
+    short int *current_table;
+
+    switch (shared_state.current_waveform) {
+        case WAVE_SINE:     current_table = wavetable_sine; break;
+        case WAVE_SQUARE:   current_table = wavetable_square; break;
+        case WAVE_SAW:      current_table = wavetable_saw; break;
+        case WAVE_TRIANGLE: current_table = wavetable_triangle; break;
+        default:            current_table = wavetable_sine; break;
+    }
+
+    int samp = current_table[offset0 >> 16];
     
     // Ensure no audio clipping when two samples added
     samp /= 2;
@@ -71,14 +94,14 @@ void audio_init(){
     gpio_set_function(PIN_SPEAKER, GPIO_FUNC_PWM);
 
     // Set slice's clock divider value
-    uint slice = pwm_gpio_to_slice_num(36);
+    uint slice = pwm_gpio_to_slice_num(PIN_SPEAKER);
     pwm_set_clkdiv(slice, 150);
     
     // Set period of PWM signal
     pwm_set_wrap(slice, (1000000 / RATE) - 1);
     
     // Initialize duty cycle to 0
-    pwm_set_gpio_level(36, 0);
+    pwm_set_gpio_level(PIN_SPEAKER, 0);
 
     init_wavetable();
 
