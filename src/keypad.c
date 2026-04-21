@@ -1,544 +1,575 @@
-// keypad.c — NeoTrellis 4x4 keypad driver for RP2350 (Pico SDK)
-// Sami's I2C keypad module
+// keypad.c — Adafruit NeoTrellis driver
 //
-// This file handles:
-//   1. Low-level seesaw I2C read/write
-//   2. Keypad FIFO polling and event parsing
-//   3. NeoPixel LED color updates
-//   4. State machine for notes, record/play/stop, instrument select
-//   5. Writing into the shared_state_t struct (spinlock-protected)
+// SDA=GP2, SCL=GP3
+//
+// IDLE  --(1)--> RECORD
+// IDLE  --(2)--> PLAY
+// IDLE  --(3)--> IDLE
+// IDLE <--(4)--> INSTRUMENT_SELECT (sub-mode, flag in shared_state)
+// PLAY  --(1)--> OVERDUB
+// PLAY  --(2)--> PLAY
+// PLAY  --(3)--> IDLE
+// RECORD --(1)--> OVERDUB (commit current layer, start next)
+// OVERDUB --(1)--> OVERDUB (commit current layer, start next)
+// OVERDUB --(3)--> IDLE
+//
+//     0  1  2  3     A  A#  B  C
+//     4  5  6  7     C# D   D# E
+//     8  9 10 11     F  F#  G  G#
+//    12 13 14 15     REC PLAY STOP INSTR
 
 #include <stdio.h>
 #include <string.h>
+#include <stddef.h>
 #include "pico/stdlib.h"
 #include "hardware/i2c.h"
 #include "hardware/sync.h"
-#include "keypad.h"
 #include "music_board.h"
+#include "keypad.h"
 
-// ============ INTERNAL STATE ============
+// SEESAW PROTOCALL CONSTANTS
 
-static ui_state_t   ui_state = UI_STATE_NOTES;
-static uint8_t      selected_waveform = WAVE_SINE;
-static uint32_t     last_event_ms = 0;
-static spin_lock_t *shared_lock = NULL;
+// Module base addresses
+#define SEESAW_STATUS_BASE        0x00
+#define SEESAW_NEOPIXEL_BASE      0x0E
+#define SEESAW_KEYPAD_BASE        0x10
 
-// Which I2C instance to use (I2C1 for GPIO2/3)
-#define KEYPAD_I2C i2c1
+// Status module
+#define SEESAW_STATUS_HW_ID       0x01
+#define SEESAW_STATUS_SWRST       0x7F
 
-// ============ LOW-LEVEL SEESAW I2C ============
+// Keypad module
+#define SEESAW_KEYPAD_STATUS      0x00
+#define SEESAW_KEYPAD_EVENT       0x01
+#define SEESAW_KEYPAD_INTENSET    0x02
+#define SEESAW_KEYPAD_INTENCLR    0x03
+#define SEESAW_KEYPAD_COUNT       0x04
+#define SEESAW_KEYPAD_FIFO        0x10
 
-// Write to a seesaw register: [module_base, function_reg, ...data]
-static bool seesaw_write(uint8_t module_base, uint8_t func_reg,
-                          const uint8_t *data, size_t len) {
-    uint8_t buf[2 + len];
-    buf[0] = module_base;
-    buf[1] = func_reg;
-    if (data && len > 0) {
-        memcpy(&buf[2], data, len);
-    }
-    int ret = i2c_write_blocking(KEYPAD_I2C, TRELLIS_ADDR, buf, 2 + len, false);
-    return (ret == (int)(2 + len));
+// Keypad edge codes (as packed into event byte bits [0:1])
+#define KEY_EDGE_HIGH             0
+#define KEY_EDGE_LOW              1
+#define KEY_EDGE_FALLING          2   // key pressed
+#define KEY_EDGE_RISING           3   // key released
+
+// Neopixel module
+#define SEESAW_NEOPIXEL_STATUS        0x00
+#define SEESAW_NEOPIXEL_PIN           0x01
+#define SEESAW_NEOPIXEL_SPEED         0x02
+#define SEESAW_NEOPIXEL_BUF_LENGTH    0x03
+#define SEESAW_NEOPIXEL_BUF           0x04
+#define SEESAW_NEOPIXEL_SHOW          0x05
+
+// NeoTrellis specifics
+#define NEOTRELLIS_NEOPIXEL_PIN   3
+#define NUM_KEYS                  16
+
+// Seesaw keypad layout has gaps: key k (0..15) maps to seesaw input
+// (k/4)*8 + (k%4). Inverse is (s/8)*4 + (s%4).
+#define NEO_KEY(k)                (((k) / 4) * 8 + ((k) % 4))
+
+static inline uint8_t seesaw_to_key(uint8_t s) {
+    return (uint8_t)((s / 8) * 4 + (s % 4));
 }
 
-// Read from a seesaw register: write [module_base, func_reg], then read
-static bool seesaw_read(uint8_t module_base, uint8_t func_reg,
-                         uint8_t *dest, size_t len, uint16_t delay_us) {
-    uint8_t cmd[2] = { module_base, func_reg };
-    int ret = i2c_write_blocking(KEYPAD_I2C, TRELLIS_ADDR, cmd, 2, true);
-    if (ret != 2) return false;
+// I2C configuration
 
-    // Seesaw needs a short delay between write and read
-    if (delay_us > 0) {
-        sleep_us(delay_us);
-    } else {
-        sleep_us(250);  // default safe delay
-    }
+#define I2C_PORT        i2c1
+#define I2C_BAUDRATE    400000
 
-    ret = i2c_read_blocking(KEYPAD_I2C, TRELLIS_ADDR, dest, len, false);
-    return (ret == (int)len);
+// -------------------------------------------------------------------
+// LED colors — WS2812 is GRB
+// -------------------------------------------------------------------
+
+#define COLOR_RGB(r, g, b)  (((uint32_t)(g) << 16) | ((uint32_t)(r) << 8) | (uint32_t)(b))
+#define COLOR_OFF           COLOR_RGB(0,  0,  0)
+#define COLOR_WHITE         COLOR_RGB(40, 40, 40)
+#define COLOR_DIM_WHITE     COLOR_RGB(10, 10, 10)
+#define COLOR_DARK_WHITE    COLOR_RGB(2,  2,  2)
+#define COLOR_RED           COLOR_RGB(48, 0,  0)
+#define COLOR_DIM_RED       COLOR_RGB(12, 0,  0)
+#define COLOR_GREEN         COLOR_RGB(0,  48, 0)
+#define COLOR_DIM_GREEN     COLOR_RGB(0,  12, 0)
+#define COLOR_BLUE          COLOR_RGB(0,  0,  48)
+#define COLOR_DIM_BLUE      COLOR_RGB(0,  0,  12)
+#define COLOR_YELLOW        COLOR_RGB(36, 36, 0)
+#define COLOR_DIM_YELLOW    COLOR_RGB(9,  9,  0)
+#define COLOR_DIM_GREEN_2   COLOR_RGB(0,  9,  0)
+#define COLOR_MAGENTA       COLOR_RGB(36, 0,  36)
+#define COLOR_DIM_MAGENTA   COLOR_RGB(9,  0,  9)
+
+// -------------------------------------------------------------------
+// Module-local state
+// -------------------------------------------------------------------
+
+static bool           trellis_ok            = false;
+static bool           leds_dirty            = true;
+static uint8_t        last_pressed_note_key = 0xFF;
+static uint32_t       led_cache[NUM_KEYS];
+static spin_lock_t   *shared_lock           = NULL;
+
+static uint32_t       record_start_ms       = 0;
+static uint32_t       last_event_ms         = 0;
+static uint8_t        record_target_layer   = 0;
+
+// -------------------------------------------------------------------
+// Forward declarations
+// -------------------------------------------------------------------
+
+static bool seesaw_write(uint8_t base, uint8_t func, const uint8_t *data, size_t len);
+static bool seesaw_read(uint8_t base, uint8_t func, uint8_t *data, size_t len, uint32_t delay_us);
+static void set_pixel(uint8_t key, uint32_t grb_color);
+static void refresh_pixels(void);
+static void update_leds(shared_state_t *state);
+static void handle_key_press(uint8_t key, shared_state_t *state);
+static void handle_key_release(uint8_t key, shared_state_t *state);
+static void add_recorded_event(shared_state_t *state, uint8_t note);
+static void start_recording(shared_state_t *state, uint8_t layer);
+static void finalize_recording(shared_state_t *state);
+
+// Short helpers for the shared-state spinlock.
+static inline uint32_t lock_acquire(void) {
+    return spin_lock_blocking(shared_lock);
+}
+static inline void lock_release(uint32_t save) {
+    spin_unlock(shared_lock, save);
 }
 
-// ============ SEESAW HELPERS ============
-
-static bool seesaw_reset(void) {
-    uint8_t rst = 0xFF;
-    bool ok = seesaw_write(SEESAW_STATUS_BASE, SEESAW_STATUS_SWRST, &rst, 1);
-    sleep_ms(500);  // seesaw needs time to reboot after reset
-    return ok;
-}
-
-static bool seesaw_check_id(void) {
-    // Just verify we can talk to the device via I2C ACK
-    uint8_t dummy;
-    int ret = i2c_read_blocking(KEYPAD_I2C, TRELLIS_ADDR, &dummy, 1, false);
-    return (ret >= 0);
-}
-
-// Enable keypad event on a specific key + edge
-static void keypad_enable_event(uint8_t key, uint8_t edge) {
-    // From CircuitPython source: cmd[0] = key, cmd[1] = (1 << (edge+1)) | enable
-    // key is the raw seesaw key number (NOT bit-shifted)
-    // edge: 0=HIGH, 1=LOW, 2=FALLING, 3=RISING
-    uint8_t seesaw_key = NEO_TRELLIS_KEY(key);
-    uint8_t cmd[2];
-    cmd[0] = seesaw_key;
-    cmd[1] = (1 << (edge + 1)) | 0x01;  // enable=1, with edge bitmask
-    seesaw_write(SEESAW_KEYPAD_BASE, SEESAW_KEYPAD_EVENT, cmd, 2);
-}
-
-// Get number of events in the keypad FIFO
-static uint8_t keypad_get_count(void) {
-    uint8_t count = 0;
-    seesaw_read(SEESAW_KEYPAD_BASE, SEESAW_KEYPAD_COUNT, &count, 1, 5000);
-    // 0xFF means the read returned garbage — treat as 0
-    if (count == 0xFF) return 0;
-    return count;
-}
-
-// Read raw events from keypad FIFO
-// Each event is 1 byte: bits [7:2] = seesaw key, bits [1:0] = edge
-static bool keypad_read_fifo(uint8_t *buf, uint8_t count) {
-    return seesaw_read(SEESAW_KEYPAD_BASE, SEESAW_KEYPAD_FIFO, buf, count, 5000);
-}
-
-// ============ NEOPIXEL HELPERS ============
-
-static void neopixel_init(void) {
-    // Set NeoPixel output pin
-    uint8_t pin = NEO_TRELLIS_NEOPIX_PIN;
-    seesaw_write(SEESAW_NEOPIXEL_BASE, SEESAW_NEOPIXEL_PIN, &pin, 1);
-
-    // Set speed to 800KHz (1 = 800KHz, 0 = 400KHz)
-    uint8_t speed = 1;
-    seesaw_write(SEESAW_NEOPIXEL_BASE, SEESAW_NEOPIXEL_SPEED, &speed, 1);
-
-    // Set buffer length: 16 pixels * 3 bytes (GRB) = 48 bytes
-    uint8_t len_buf[2] = { 0x00, 48 };  // big-endian 16-bit
-    seesaw_write(SEESAW_NEOPIXEL_BASE, SEESAW_NEOPIXEL_BUF_LENGTH, len_buf, 2);
-}
-
-// Set one pixel color. color is 0xGGRRBB (GRB order).
-static void neopixel_set(uint8_t pixel, uint32_t color) {
-    uint8_t buf[5];
-    // First 2 bytes: offset into the pixel buffer (pixel * 3), big-endian
-    uint16_t offset = pixel * 3;
-    buf[0] = (offset >> 8) & 0xFF;
-    buf[1] = offset & 0xFF;
-    // Next 3 bytes: G, R, B
-    buf[2] = (color >> 16) & 0xFF;  // Green
-    buf[3] = (color >> 8)  & 0xFF;  // Red
-    buf[4] = color & 0xFF;          // Blue
-    seesaw_write(SEESAW_NEOPIXEL_BASE, SEESAW_NEOPIXEL_BUF, buf, 5);
-}
-
-// Push pixel buffer to LEDs
-static void neopixel_show(void) {
-    seesaw_write(SEESAW_NEOPIXEL_BASE, SEESAW_NEOPIXEL_SHOW, NULL, 0);
-}
-
-// ============ LED UPDATE LOGIC ============
-
-// Set all 16 LEDs based on current UI state and system mode
-void keypad_update_leds(shared_state_t *state) {
-    if (ui_state == UI_STATE_NOTES) {
-        // Top 12 keys: note colors
-        for (int i = 0; i < 12; i++) {
-            if (state->current_note == key_to_note[i]) {
-                neopixel_set(i, COLOR_NOTE_ACTIVE);
-            } else {
-                neopixel_set(i, COLOR_NOTE_IDLE);
-            }
-        }
-
-        // Bottom row: control keys
-        // Record button
-        if (state->system_mode == MODE_RECORDING || state->system_mode == MODE_OVERDUB) {
-            neopixel_set(KEY_RECORD, COLOR_RECORD_ON);
-        } else {
-            neopixel_set(KEY_RECORD, COLOR_RECORD);
-        }
-
-        // Play button
-        if (state->system_mode == MODE_PLAYING || state->system_mode == MODE_OVERDUB) {
-            neopixel_set(KEY_PLAY, COLOR_PLAY_ON);
-        } else {
-            neopixel_set(KEY_PLAY, COLOR_PLAY);
-        }
-
-        // Stop button
-        neopixel_set(KEY_STOP, COLOR_STOP);
-
-        // Instrument select button
-        neopixel_set(KEY_INSTRUMENT, COLOR_INST);
-
-    } else {
-        // UI_STATE_INSTRUMENT: show waveform options on first 4 keys
-        uint32_t wave_colors[WAVE_COUNT] = {
-            COLOR_SINE, COLOR_SQUARE, COLOR_SAW, COLOR_TRIANGLE
-        };
-        for (int i = 0; i < WAVE_COUNT; i++) {
-            if (i == selected_waveform) {
-                neopixel_set(i, wave_colors[i]);  // bright = selected
-            } else {
-                // Dim version: shift right by 4
-                uint32_t dim = ((wave_colors[i] >> 4) & 0x0F0F0F);
-                neopixel_set(i, dim);
-            }
-        }
-        // Keys 4-14: off
-        for (int i = WAVE_COUNT; i < 15; i++) {
-            neopixel_set(i, COLOR_OFF);
-        }
-        // Key 15 (instrument): bright to show we're in this menu
-        neopixel_set(KEY_INSTRUMENT, COLOR_INST_ON);
-    }
-
-    neopixel_show();
-}
-
-// ============ KEY EVENT HANDLERS ============
-
-// Note name lookup for debug printing
-static const char *note_names[12] = {
-    "A", "A#", "B", "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#"
-};
-
-static const char *mode_names[4] = {
-    "IDLE", "RECORDING", "PLAYING", "OVERDUB"
-};
-
-static const char *wave_names[4] = {
-    "SINE", "SQUARE", "SAW", "TRIANGLE"
-};
-
-// Handle a note key press (keys 0-11)
-static void handle_note_press(uint8_t key, shared_state_t *state) {
-    uint8_t note = key_to_note[key];
-
-    printf("[NOTE] Key %d -> %s pressed", key, note_names[note]);
-
-    // Update shared state with spinlock
-    uint32_t irq = spin_lock_blocking(shared_lock);
-    state->current_note = note;
-    spin_unlock(shared_lock, irq);
-
-    // If recording or overdubbing, store the note event
-    if (state->system_mode == MODE_RECORDING || state->system_mode == MODE_OVERDUB) {
-        uint8_t loop_idx = state->active_loop;
-        uint8_t layer = state->loops[loop_idx].layer_count;
-
-        if (layer < MAX_LAYERS) {
-            uint16_t evt_idx = state->loops[loop_idx].event_count[layer];
-
-            if (evt_idx < MAX_EVENTS) {
-                uint32_t now = to_ms_since_boot(get_absolute_time());
-                uint32_t delta = (last_event_ms == 0) ? 0 : (now - last_event_ms);
-                last_event_ms = now;
-
-                uint32_t irq2 = spin_lock_blocking(shared_lock);
-                state->loops[loop_idx].events[layer][evt_idx].note = note;
-                state->loops[loop_idx].events[layer][evt_idx].delta_ms = delta;
-                state->loops[loop_idx].event_count[layer] = evt_idx + 1;
-                spin_unlock(shared_lock, irq2);
-
-                printf(" | RECORDED loop=%d layer=%d evt=%d delta=%dms",
-                       loop_idx, layer, evt_idx, delta);
-            } else {
-                printf(" | BUFFER FULL!");
-            }
-        }
-    }
-    printf("\n");
-}
-
-// Handle a note key release (keys 0-11)
-static void handle_note_release(shared_state_t *state) {
-    printf("[NOTE] Released\n");
-    uint32_t irq = spin_lock_blocking(shared_lock);
-    state->current_note = NOTE_NONE;
-    spin_unlock(shared_lock, irq);
-}
-
-// Handle record button (key 12)
-static void handle_record(shared_state_t *state) {
-    uint32_t irq = spin_lock_blocking(shared_lock);
-
-    switch (state->system_mode) {
-        case MODE_IDLE:
-            state->loops[state->active_loop].layer_count = 0;
-            state->loops[state->active_loop].event_count[0] = 0;
-            state->loops[state->active_loop].duration_ms = 0;
-            state->system_mode = MODE_RECORDING;
-            last_event_ms = 0;
-            printf("[REC ] Started fresh recording on loop %d\n", state->active_loop);
-            break;
-
-        case MODE_PLAYING:
-            {
-                uint8_t loop_idx = state->active_loop;
-                uint8_t next_layer = state->loops[loop_idx].layer_count;
-                if (next_layer < MAX_LAYERS) {
-                    state->loops[loop_idx].event_count[next_layer] = 0;
-                    state->system_mode = MODE_OVERDUB;
-                    last_event_ms = 0;
-                    printf("[REC ] Overdub started on loop %d, layer %d\n", loop_idx, next_layer);
-                } else {
-                    printf("[REC ] Cannot overdub — max layers (%d) reached!\n", MAX_LAYERS);
-                }
-            }
-            break;
-
-        case MODE_RECORDING:
-        case MODE_OVERDUB:
-            printf("[REC ] Already recording — ignored\n");
-            break;
-    }
-
-    spin_unlock(shared_lock, irq);
-}
-
-// Handle play button (key 13)
-static void handle_play(shared_state_t *state) {
-    uint32_t irq = spin_lock_blocking(shared_lock);
-
-    if (state->system_mode == MODE_IDLE) {
-        uint8_t loop_idx = state->active_loop;
-        if (state->loops[loop_idx].layer_count > 0 ||
-            state->loops[loop_idx].event_count[0] > 0) {
-            state->system_mode = MODE_PLAYING;
-            printf("[PLAY] Playing loop %d (%d layers, %d events in layer 0, %dms)\n",
-                   loop_idx,
-                   state->loops[loop_idx].layer_count,
-                   state->loops[loop_idx].event_count[0],
-                   state->loops[loop_idx].duration_ms);
-        } else {
-            printf("[PLAY] Nothing recorded on loop %d — ignored\n", loop_idx);
-        }
-    } else {
-        printf("[PLAY] Not idle (mode=%s) — ignored\n", mode_names[state->system_mode]);
-    }
-
-    spin_unlock(shared_lock, irq);
-}
-
-// Handle stop button (key 14)
-static void handle_stop(shared_state_t *state) {
-    uint32_t irq = spin_lock_blocking(shared_lock);
-
-    if (state->system_mode == MODE_RECORDING) {
-        uint8_t loop_idx = state->active_loop;
-        uint32_t now = to_ms_since_boot(get_absolute_time());
-        if (last_event_ms > 0) {
-            uint32_t total = 0;
-            uint16_t count = state->loops[loop_idx].event_count[0];
-            for (uint16_t i = 0; i < count; i++) {
-                total += state->loops[loop_idx].events[0][i].delta_ms;
-            }
-            state->loops[loop_idx].duration_ms = total;
-        }
-        state->loops[loop_idx].layer_count = 1;
-        state->system_mode = MODE_IDLE;
-        printf("[STOP] Recording stopped. Loop %d: %d events, %dms duration\n",
-               loop_idx,
-               state->loops[loop_idx].event_count[0],
-               state->loops[loop_idx].duration_ms);
-
-        // Dump recorded events
-        uint16_t count = state->loops[loop_idx].event_count[0];
-        for (uint16_t i = 0; i < count && i < 20; i++) {
-            printf("       evt[%d] note=%s delta=%dms\n", i,
-                   note_names[state->loops[loop_idx].events[0][i].note],
-                   state->loops[loop_idx].events[0][i].delta_ms);
-        }
-        if (count > 20) printf("       ... (%d more)\n", count - 20);
-
-    } else if (state->system_mode == MODE_OVERDUB) {
-        uint8_t loop_idx = state->active_loop;
-        uint8_t finished_layer = state->loops[loop_idx].layer_count;
-        state->loops[loop_idx].layer_count++;
-        state->system_mode = MODE_PLAYING;
-        printf("[STOP] Overdub stopped. Loop %d now has %d layers (layer %d: %d events)\n",
-               loop_idx,
-               state->loops[loop_idx].layer_count,
-               finished_layer,
-               state->loops[loop_idx].event_count[finished_layer]);
-
-    } else if (state->system_mode == MODE_PLAYING) {
-        state->system_mode = MODE_IDLE;
-        printf("[STOP] Playback stopped.\n");
-
-    } else {
-        printf("[STOP] Already idle — ignored\n");
-    }
-
-    state->current_note = NOTE_NONE;
-    last_event_ms = 0;
-
-    spin_unlock(shared_lock, irq);
-}
-
-// Handle instrument select button (key 15)
-static void handle_instrument(shared_state_t *state) {
-    if (ui_state == UI_STATE_NOTES) {
-        ui_state = UI_STATE_INSTRUMENT;
-        printf("[INST] Entering instrument select (current: %s)\n", wave_names[selected_waveform]);
-    } else {
-        uint32_t irq = spin_lock_blocking(shared_lock);
-        state->current_waveform = selected_waveform;
-        spin_unlock(shared_lock, irq);
-        ui_state = UI_STATE_NOTES;
-        printf("[INST] Back to notes. Waveform set to %s\n", wave_names[selected_waveform]);
-    }
-}
-
-// Handle key press in instrument select mode (State 2)
-static void handle_instrument_select(uint8_t key, shared_state_t *state) {
-    if (key < WAVE_COUNT) {
-        selected_waveform = key;
-        uint32_t irq = spin_lock_blocking(shared_lock);
-        state->current_waveform = selected_waveform;
-        spin_unlock(shared_lock, irq);
-        printf("[INST] Selected waveform: %s\n", wave_names[selected_waveform]);
-    } else {
-        printf("[INST] Key %d not a waveform — ignored\n", key);
-    }
-}
-
-// ============ PUBLIC API ============
+// -------------------------------------------------------------------
+// Public API
+// -------------------------------------------------------------------
 
 bool keypad_init(void) {
-    // Initialize I2C1 at 100kHz (safe default for seesaw)
-    i2c_init(KEYPAD_I2C, 100 * 1000);
-    scan_i2c();
+    i2c_init(I2C_PORT, I2C_BAUDRATE);
     gpio_set_function(PIN_I2C_SDA, GPIO_FUNC_I2C);
     gpio_set_function(PIN_I2C_SCL, GPIO_FUNC_I2C);
     gpio_pull_up(PIN_I2C_SDA);
     gpio_pull_up(PIN_I2C_SCL);
 
-
-
-    // Claim a hardware spinlock for shared state
     shared_lock = spin_lock_init(SHARED_SPINLOCK_NUM);
 
-    // Reset the seesaw chip and wait for it to fully boot
-    printf("Skipping reset.\n");
-  sleep_ms(500);
+    sleep_ms(10);
 
-    // Verify we can talk to it
-    printf("Checking NeoTrellis...\n");
-    if (!seesaw_check_id()) {
-        printf("ERROR: NeoTrellis not found at 0x%02X\n", TRELLIS_ADDR);
+    // Software reset the Seesaw
+    uint8_t reset_val = 0xFF;
+    if (!seesaw_write(SEESAW_STATUS_BASE, SEESAW_STATUS_SWRST, &reset_val, 1)) {
+        printf("Keypad: seesaw reset write failed (I2C no-ack?)\n");
         return false;
     }
-    printf("NeoTrellis found at 0x%02X!\n", TRELLIS_ADDR);
+    sleep_ms(500);
 
-    // Initialize NeoPixels
-    neopixel_init();
+    // Configure the neopixel strip
+    uint8_t buf_len[2] = {0x00, NUM_KEYS * 3};
+    seesaw_write(SEESAW_NEOPIXEL_BASE, SEESAW_NEOPIXEL_BUF_LENGTH, buf_len, 2);
+    uint8_t pix_pin = NEOTRELLIS_NEOPIXEL_PIN;
+    seesaw_write(SEESAW_NEOPIXEL_BASE, SEESAW_NEOPIXEL_PIN, &pix_pin, 1);
 
-    // Enable RISING and FALLING events for all 16 keys
-    for (int i = 0; i < NEO_TRELLIS_NUM_KEYS; i++) {
-        keypad_enable_event(i, SEESAW_KEYPAD_EDGE_RISING);
-        sleep_ms(10);  // give seesaw time to process
-        keypad_enable_event(i, SEESAW_KEYPAD_EDGE_FALLING);
-        sleep_ms(10);
+    // Enable both rising (release) and falling (press) events for every key.
+    for (int i = 0; i < NUM_KEYS; i++) {
+        uint8_t s = NEO_KEY(i);
+        uint8_t falling[2] = {s, 0x09};
+        seesaw_write(SEESAW_KEYPAD_BASE, SEESAW_KEYPAD_EVENT, falling, 2);
+        sleep_ms(1);
+        uint8_t rising[2] = {s, 0x11};
+        seesaw_write(SEESAW_KEYPAD_BASE, SEESAW_KEYPAD_EVENT, rising, 2);
+        sleep_ms(1);
     }
-    printf("All key events enabled.\n");
 
-    // Enable keypad interrupt
-    uint8_t int_enable = 0x01;
-    seesaw_write(SEESAW_KEYPAD_BASE, SEESAW_KEYPAD_INTENSET, &int_enable, 1);
+    // Blank all LEDs
+    for (int i = 0; i < NUM_KEYS; i++) {
+        led_cache[i] = 0xFFFFFFFFu;
+    }
 
-    printf("Keypad initialized. %d keys active.\n", NEO_TRELLIS_NUM_KEYS);
-    printf("  UI state: NOTES | Mode: IDLE | Waveform: SINE\n");
+    trellis_ok  = true;
+    leds_dirty  = true;
+    printf("Keypad: init OK\n");
     return true;
 }
 
-void scan_i2c() {
-    printf("Scanning I2C...\n");
+void keypad_poll(shared_state_t *state) {
+    if (!trellis_ok) return;
 
-    for (int addr = 0; addr < 128; addr++) {
-        uint8_t dummy;
-        int ret = i2c_read_timeout_us(i2c1, addr, &dummy, 1, false, 2000);
+    // how many events are waiting in FIFO?
+    // if none, return
+    uint8_t count = 0;
+    if (!seesaw_read(SEESAW_KEYPAD_BASE, SEESAW_KEYPAD_COUNT, &count, 1, 500)) {
+        return;  
+    }
 
-        if (ret >= 0) {
-            printf("Found device at 0x%02X\n", addr);
+    if (count > 0) {
+        if (count > NUM_KEYS) count = NUM_KEYS;  // cap to sane size
+        uint8_t events[NUM_KEYS];
+        if (!seesaw_read(SEESAW_KEYPAD_BASE, SEESAW_KEYPAD_FIFO, events, count, 1000)) {
+            return;
+        }
+
+        for (int i = 0; i < count; i++) {
+            uint8_t raw  = events[i];
+            uint8_t edge = raw & 0x03;
+            uint8_t s    = raw >> 2;
+            uint8_t k    = seesaw_to_key(s);
+            if (k >= NUM_KEYS) continue;
+
+            if (edge == KEY_EDGE_FALLING) {
+                handle_key_press(k, state);
+            } else if (edge == KEY_EDGE_RISING) {
+                handle_key_release(k, state);
+            }
         }
     }
 
-    printf("Scan done.\n");
+    if (leds_dirty) {
+        update_leds(state);
+        leds_dirty = false;
+    }
 }
 
-void keypad_poll(shared_state_t *state) {
-    // No INT pin wired — always poll the FIFO directly
-    uint8_t count = keypad_get_count();
+// -------------------------------------------------------------------
+// State machine
+// -------------------------------------------------------------------
 
-    // Debug: print count every 100 polls so we can see if FIFO ever fills
-    static uint32_t poll_num = 0;
-    poll_num++;
-    if (poll_num % 100 == 0) {
-        printf("[POLL] #%d count=%d\n", poll_num, count);
-    }
-    if (count > 0) {
-        printf("[POLL] %d events in FIFO!\n", count);
-    }
-    if (count == 0) {
-        keypad_update_leds(state);
+static void handle_key_press(uint8_t key, shared_state_t *state) {
+    uint32_t save;
+
+    save = lock_acquire();
+    uint8_t mode = state->system_mode;
+    bool    in_instr = state->in_instrument_select != 0;
+    lock_release(save);
+
+    // Instrument-select
+    if (in_instr) {
+        if (key <= 4) {
+            // Keys 0..4 map to SINE, SQUARE, SAW, TRIANGLE, MIC
+            static const uint8_t wf[5] = {
+                WAVE_SINE, WAVE_SQUARE, WAVE_SAW, WAVE_TRIANGLE, WAVE_MIC
+            };
+            save = lock_acquire();
+            state->current_waveform = wf[key];
+            lock_release(save);
+            printf("Keypad: waveform -> %d\n", wf[key]);
+            leds_dirty = true;
+
+        } else if (key == KEY_INSTRUMENT) {
+            // Exit instrument select back to IDLE.
+            save = lock_acquire();
+            state->in_instrument_select = 0;
+            lock_release(save);
+            printf("Keypad: exit instrument select\n");
+            leds_dirty = true;
+        }
         return;
     }
 
-    // Add 2 extra slots for polling safety (matches Adafruit library behavior)
-    uint8_t read_count = count + 2;
-    uint8_t events[read_count];
+    // Notes A, A#... G
+    if (key < 12) {
+        uint8_t note = key_to_note[key];
 
-    if (!keypad_read_fifo(events, read_count)) {
-        keypad_update_leds(state);
+        save = lock_acquire();
+        state->current_note = note;
+        lock_release(save);
+        printf("%d\n", note);
+
+        last_pressed_note_key = key;
+
+        if (mode == MODE_RECORDING || mode == MODE_OVERDUB) {
+            add_recorded_event(state, note);
+        }
+
+        leds_dirty = true;
         return;
     }
 
-    // Process each event
-    for (int i = 0; i < read_count; i++) {
-        uint8_t raw = events[i];
-        uint8_t seesaw_key = (raw >> 2) & 0x3F;
-        uint8_t edge = raw & 0x03;
+    // Menu Record, Play, Stop, Instr select
+    switch (key) {
 
-        // Convert seesaw key number to NeoTrellis key 0-15
-        uint8_t key = NEO_TRELLIS_SEESAW_KEY(seesaw_key);
-        if (key >= NEO_TRELLIS_NUM_KEYS) continue;  // invalid
-
-        bool pressed = (edge == SEESAW_KEYPAD_EDGE_RISING);
-
-        // Route based on UI state
-        if (ui_state == UI_STATE_INSTRUMENT) {
-            // In instrument select mode
-            if (pressed) {
-                if (key == KEY_INSTRUMENT) {
-                    handle_instrument(state);  // toggle back to notes
-                } else {
-                    handle_instrument_select(key, state);
-                }
+    case KEY_RECORD: {
+        if (mode == MODE_IDLE) {
+            save = lock_acquire();
+            uint8_t loop_idx = state->active_loop;
+            for (int L = 0; L < MAX_LAYERS; L++) {
+                state->loops[loop_idx].event_count[L] = 0;
             }
-        } else {
-            // Normal note mode
-            if (key < 12) {
-                // Note key
-                if (pressed) {
-                    handle_note_press(key, state);
-                } else {
-                    handle_note_release(state);
-                }
-            } else if (pressed) {
-                // Control keys (only on press, not release)
-                switch (key) {
-                    case KEY_RECORD:     handle_record(state);     break;
-                    case KEY_PLAY:       handle_play(state);       break;
-                    case KEY_STOP:       handle_stop(state);       break;
-                    case KEY_INSTRUMENT: handle_instrument(state);  break;
-                }
-            }
+            state->loops[loop_idx].layer_count = 0;
+            state->loops[loop_idx].duration_ms = 0;
+            state->system_mode = MODE_RECORDING;
+            lock_release(save);
+
+            start_recording(state, 0);
+            printf("Keypad: IDLE -> RECORDING (layer 0)\n");
+
+        } else if (mode == MODE_PLAYING) {
+            save = lock_acquire();
+            uint8_t loop_idx = state->active_loop;
+            uint8_t L = state->loops[loop_idx].layer_count;
+            if (L >= MAX_LAYERS) L = MAX_LAYERS - 1;
+            state->system_mode = MODE_OVERDUB;
+            lock_release(save);
+
+            start_recording(state, L);
+            printf("Keypad: PLAYING -> OVERDUB (layer %u)\n", L);
+
+        } else if (mode == MODE_OVERDUB) {
+            finalize_recording(state);
+
+            save = lock_acquire();
+            uint8_t loop_idx = state->active_loop;
+            uint8_t L = state->loops[loop_idx].layer_count;
+            if (L >= MAX_LAYERS) L = MAX_LAYERS - 1;
+            lock_release(save);
+
+            start_recording(state, L);
+            printf("Keypad: OVERDUB next layer (%u)\n", L);
+        } else if (mode == MODE_RECORDING) {
+            finalize_recording(state);
+
+            save = lock_acquire();
+            uint8_t loop_idx = state->active_loop;
+            uint8_t L = state->loops[loop_idx].layer_count;
+            if (L >= MAX_LAYERS) L = MAX_LAYERS - 1;
+            lock_release(save);
+
+            start_recording(state, L);
+            printf("Keypad: OVERDUB next layer (%u)\n", L);
+        }
+        leds_dirty = true;
+        break;
+    }
+
+    case KEY_PLAY: {
+        if (mode == MODE_IDLE || mode == MODE_PLAYING) {
+            save = lock_acquire();
+            state->system_mode = MODE_PLAYING;
+            lock_release(save);
+            printf("Keypad: -> PLAYING\n");
+        } else if (mode == MODE_OVERDUB) {
+            finalize_recording(state);
+            save = lock_acquire();
+            state->system_mode = MODE_PLAYING;
+            lock_release(save);
+            printf("Keypad: OVERDUB -> PLAYING\n");
+        }
+        leds_dirty = true;
+        break;
+    }
+
+    case KEY_STOP: {
+        if (mode == MODE_RECORDING || mode == MODE_OVERDUB) {
+            finalize_recording(state);
+        }
+        save = lock_acquire();
+        state->system_mode         = MODE_IDLE;
+        state->current_note        = NOTE_NONE;
+        state->in_instrument_select = 0;
+        lock_release(save);
+        last_pressed_note_key = 0xFF;
+        printf("Keypad: -> IDLE\n");
+        leds_dirty = true;
+        break;
+    }
+
+    case KEY_INSTRUMENT: {
+        if (mode == MODE_IDLE) {
+            save = lock_acquire();
+            state->in_instrument_select = 1;
+            lock_release(save);
+            printf("Keypad: enter instrument select\n");
+            leds_dirty = true;
+        }
+        break;
+    }
+
+    default: break;
+    }
+}
+
+// AKA stop playing when note is released
+static void handle_key_release(uint8_t key, shared_state_t *state) {
+    if (key >= 12) return;
+
+    if (key != last_pressed_note_key) return;
+
+    uint32_t save;
+
+    save = lock_acquire();
+    state->current_note = NOTE_NONE;
+    uint8_t mode = state->system_mode;
+    lock_release(save);
+
+    last_pressed_note_key = 0xFF;
+
+    if (mode == MODE_RECORDING || mode == MODE_OVERDUB) {
+        add_recorded_event(state, NOTE_NONE);
+    }
+
+    leds_dirty = true;
+}
+
+// -------------------------------------------------------------------
+// Recording helpers
+// -------------------------------------------------------------------
+
+static void start_recording(shared_state_t *state, uint8_t layer) {
+    record_start_ms = to_ms_since_boot(get_absolute_time());
+    last_event_ms = record_start_ms;
+    record_target_layer = layer;
+
+    uint32_t save = lock_acquire();
+    state->loops[state->active_loop].event_count[layer] = 0;
+    lock_release(save);
+}
+
+static void add_recorded_event(shared_state_t *state, uint8_t note) {
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+    uint32_t delta = now - last_event_ms;
+    last_event_ms = now;
+
+    uint32_t save = lock_acquire();
+    uint8_t  loop_idx = state->active_loop;
+    uint8_t  L = record_target_layer;
+    uint16_t n = state->loops[loop_idx].event_count[L];
+
+    if (n < MAX_EVENTS) {
+        state->loops[loop_idx].events[L][n].note = note;
+        state->loops[loop_idx].events[L][n].delta_ms = delta;
+        state->loops[loop_idx].event_count[L] = (uint16_t)(n + 1);
+    }
+    lock_release(save);
+}
+
+static void finalize_recording(shared_state_t *state) {
+    uint32_t now      = to_ms_since_boot(get_absolute_time());
+    uint32_t duration = now - record_start_ms;
+
+    uint32_t save = lock_acquire();
+    uint8_t  loop_idx = state->active_loop;
+
+    // First layer
+    if (record_target_layer == 0) {
+        state->loops[loop_idx].duration_ms = duration;
+    }
+    // Only bump layer_count if we actually captured something
+    if (state->loops[loop_idx].event_count[record_target_layer] > 0) {
+        uint8_t needed = (uint8_t)(record_target_layer + 1);
+        if (needed > state->loops[loop_idx].layer_count) {
+            state->loops[loop_idx].layer_count = needed;
         }
     }
+    lock_release(save);
+}
 
-    // Refresh LEDs after processing events
-    keypad_update_leds(state);
+// -------------------------------------------------------------------
+// LED control
+// -------------------------------------------------------------------
+
+static void set_pixel(uint8_t key, uint32_t grb) {
+    if (key >= NUM_KEYS) return;
+    uint16_t offset = (uint16_t)(key * 3);
+    uint8_t payload[5] = {
+        (uint8_t)(offset >> 8),
+        (uint8_t)(offset & 0xFF),
+        (uint8_t)((grb >> 16) & 0xFF),  // G
+        (uint8_t)((grb >> 8)  & 0xFF),  // R
+        (uint8_t)( grb        & 0xFF),  // B
+    };
+    seesaw_write(SEESAW_NEOPIXEL_BASE, SEESAW_NEOPIXEL_BUF, payload, 5);
+    led_cache[key] = grb;
+}
+
+static void refresh_pixels(void) {
+    seesaw_write(SEESAW_NEOPIXEL_BASE, SEESAW_NEOPIXEL_SHOW, NULL, 0);
+}
+
+static uint32_t waveform_color(uint8_t wf) {
+    switch (wf) {
+    case WAVE_SINE:     return COLOR_BLUE;
+    case WAVE_SQUARE:   return COLOR_RED;
+    case WAVE_SAW:      return COLOR_YELLOW;
+    case WAVE_TRIANGLE: return COLOR_GREEN;
+    case WAVE_MIC:      return COLOR_MAGENTA;
+    default:            return COLOR_WHITE;
+    }
+}
+
+static void update_leds(shared_state_t *state) {
+    uint32_t save = lock_acquire();
+    uint8_t mode     = state->system_mode;
+    uint8_t wf       = state->current_waveform;
+    bool    in_instr = state->in_instrument_select != 0;
+    lock_release(save);
+
+    uint32_t target[NUM_KEYS];
+
+    if (in_instr) {
+        static const uint32_t wf_bright[5] = {
+            COLOR_BLUE, COLOR_RED, COLOR_YELLOW, COLOR_GREEN, COLOR_MAGENTA
+        };
+        static const uint32_t wf_dim[5] = {
+            COLOR_DIM_BLUE, COLOR_DIM_RED, COLOR_DIM_YELLOW,
+            COLOR_DIM_GREEN_2, COLOR_DIM_MAGENTA
+        };
+        for (int k = 0; k < NUM_KEYS; k++) target[k] = COLOR_OFF;
+        for (int k = 0; k < 5; k++) {
+            target[k] = (wf == k) ? wf_bright[k] : wf_dim[k];
+        }
+        target[KEY_INSTRUMENT] = waveform_color(wf); 
+    } else {
+        // Normal mode.
+        for (int k = 0; k < 12; k++) {
+            if (k == last_pressed_note_key) {
+                target[k] = COLOR_WHITE;
+            } else {
+                uint8_t n = key_to_note[k];
+                // bool sharp = (n == NOTE_AS || n == NOTE_CS || n == NOTE_DS ||
+                //               n == NOTE_FS || n == NOTE_GS);
+                // target[k] = sharp ? COLOR_DARK_WHITE : COLOR_DIM_WHITE;
+                target[k] = COLOR_DIM_WHITE;
+            }
+        }
+        target[KEY_RECORD]     = (mode == MODE_RECORDING || mode == MODE_OVERDUB)
+                                 ? COLOR_RED   : COLOR_DIM_RED;
+        target[KEY_PLAY]       = (mode == MODE_PLAYING   || mode == MODE_OVERDUB)
+                                 ? COLOR_GREEN : COLOR_DIM_GREEN;
+        target[KEY_STOP]       = COLOR_DIM_WHITE;
+        target[KEY_INSTRUMENT] = waveform_color(wf);
+    }
+
+    bool changed = false;
+    for (int k = 0; k < NUM_KEYS; k++) {
+        if (target[k] != led_cache[k]) {
+            set_pixel((uint8_t)k, target[k]);
+            changed = true;
+        }
+    }
+    if (changed) refresh_pixels();
+}
+
+// -------------------------------------------------------------------
+// Low-level Seesaw I2C helpers
+// -------------------------------------------------------------------
+
+static bool seesaw_write(uint8_t base, uint8_t func, const uint8_t *data, size_t len) {
+    uint8_t buf[32];
+    if (len + 2 > sizeof(buf)) return false;
+
+    buf[0] = base;
+    buf[1] = func;
+    if (len > 0 && data != NULL) {
+        memcpy(&buf[2], data, len);
+    }
+    int n = i2c_write_blocking(I2C_PORT, TRELLIS_ADDR, buf, (uint)(2 + len), false);
+    return n == (int)(2 + len);
+}
+
+static bool seesaw_read(uint8_t base, uint8_t func, uint8_t *data, size_t len, uint32_t delay_us) {
+    // Seesaw requires: write [base, func], wait, then restart-read the bytes.
+    uint8_t cmd[2] = {base, func};
+    int w = i2c_write_blocking(I2C_PORT, TRELLIS_ADDR, cmd, 2, false);
+    if (w != 2) return false;
+
+    // The chip needs time to prepare the response. 125us is the library
+    // default; we give it more to be safe.
+    sleep_us(delay_us);
+
+    int r = i2c_read_blocking(I2C_PORT, TRELLIS_ADDR, data, (uint)len, false);
+    return r == (int)len;
 }
