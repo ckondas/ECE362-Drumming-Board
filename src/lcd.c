@@ -35,22 +35,26 @@ spi_inst_t *SPI = spi1; // Use SPI0 for the LCD
 #define DC_HIGH do { gpio_put(DC_NUM, 1); } while(0)
 #define DC_LOW  do { gpio_put(DC_NUM, 0); } while(0)
 
-void display_update(&shared_state_t state){
-    if(state.in_instrument_select == 1){
+void display_update(shared_state_t *state){
+  if((state->system_mode != state->prev_mode) || (state->prev_instrument != state->in_instrument_select)){
+    LCD_Clear(BLACK);
+  }
+  
+    if(state->in_instrument_select == 1){
         const char* state0_0 = "Sine";
         const char* state0_1 = "Square";
         const char* state0_2 = "Saw";
         const char* state0_3 = "Triangle";
         const char* state0_4 = "Microphone";
         const char* state0_5 = "Bottom right: Back";
-        LCD_DrawString(10, 10, LIGHTBLUE, BLACK, state0_0, 16, 0, 2);
+        LCD_DrawString(10, 10, BLUE, BLACK, state0_0, 16, 0, 2);
         LCD_DrawString(10, 50, RED, BLACK, state0_1, 16, 0, 2);
         LCD_DrawString(10, 90, YELLOW, BLACK, state0_2, 16, 0, 2);
         LCD_DrawString(10, 130, GREEN, BLACK, state0_3, 16, 0, 2);
         LCD_DrawString(10, 170, MAGENTA, BLACK, state0_4, 16, 0, 2);
-        LCD_DrawString(10, 170, BLUE, BLACK, state0_4, 16, 0, 2);
+        LCD_DrawString(10, 210, WHITE, BLACK, state0_5, 16, 0, 2);
     }
-    else if(state.system_mode == MODE_IDLE || state.system_mode == MODE_PLAYING){
+    else if(state->system_mode == MODE_IDLE || state->system_mode == MODE_PLAYING){
         const char* state1_0 = "From Left to Right";
         const char* state1_1 = "Recording";
         const char* state1_2 = "Play";
@@ -60,19 +64,19 @@ void display_update(&shared_state_t state){
         LCD_DrawString(10, 50, RED, BLACK, state1_1, 16, 0, 2);
         LCD_DrawString(10, 90, GREEN, BLACK, state1_2, 16, 0, 2);
         LCD_DrawString(10, 130, WHITE, BLACK, state1_3, 16, 0, 2);
-        LCD_DrawString(10, 170, LIGHTBLUE, BLACK, state1_4, 16, 0, 2);
+        LCD_DrawString(10, 170, WHITE, BLACK, state1_4, 16, 0, 2);
     }
-    else if(state.system_mode == MODE_RECORDING || state.system_mode == MODE_OVERDUB){
+    else if(state->system_mode == MODE_RECORDING || state->system_mode == MODE_OVERDUB){
         const char* state2_0 = "From Left to Right";
         const char* state2_1 = "Overdub";
         const char* state2_2 = "Play";
         const char* state2_3 = "Stop";
         const char* state2_4 = "Instrument Select";
         LCD_DrawString(10, 10, WHITE, BLACK, state2_0, 16, 0, 2);
-        LCD_DrawString(10, 50, LIGHTBLUE, BLACK, state2_1, 16, 0, 2);
-        LCD_DrawString(10, 90, LIGHTBLUE, BLACK, state2_2, 16, 0, 2);
-        LCD_DrawString(10, 130, LIGHTBLUE, BLACK, state2_3, 16, 0, 2);
-        LCD_DrawString(10, 170, LIGHTBLUE, BLACK, state2_4, 16, 0, 2);
+        LCD_DrawString(10, 50, RED, BLACK, state2_1, 16, 0, 2);
+        LCD_DrawString(10, 90, GREEN, BLACK, state2_2, 16, 0, 2);
+        LCD_DrawString(10, 130, WHITE, BLACK, state2_3, 16, 0, 2);
+        LCD_DrawString(10, 170, BLUE, BLACK, state2_4, 16, 0, 2);
     }
 }
 

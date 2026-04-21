@@ -253,6 +253,7 @@ static void handle_key_press(uint8_t key, shared_state_t *state) {
             // Exit instrument select back to IDLE.
             save = lock_acquire();
             state->in_instrument_select = 0;
+            state->prev_instrument = 1;
             lock_release(save);
             printf("Keypad: exit instrument select\n");
             leds_dirty = true;
@@ -292,6 +293,7 @@ static void handle_key_press(uint8_t key, shared_state_t *state) {
             state->loops[loop_idx].layer_count = 0;
             state->loops[loop_idx].duration_ms = 0;
             state->system_mode = MODE_RECORDING;
+            state->prev_mode = mode;
             lock_release(save);
 
             start_recording(state, 0);
@@ -303,6 +305,7 @@ static void handle_key_press(uint8_t key, shared_state_t *state) {
             uint8_t L = state->loops[loop_idx].layer_count;
             if (L >= MAX_LAYERS) L = MAX_LAYERS - 1;
             state->system_mode = MODE_OVERDUB;
+            state->prev_mode = mode;
             lock_release(save);
 
             start_recording(state, L);
@@ -315,6 +318,7 @@ static void handle_key_press(uint8_t key, shared_state_t *state) {
             uint8_t loop_idx = state->active_loop;
             uint8_t L = state->loops[loop_idx].layer_count;
             if (L >= MAX_LAYERS) L = MAX_LAYERS - 1;
+            state->prev_mode = mode;
             lock_release(save);
 
             start_recording(state, L);
@@ -326,6 +330,8 @@ static void handle_key_press(uint8_t key, shared_state_t *state) {
             uint8_t loop_idx = state->active_loop;
             uint8_t L = state->loops[loop_idx].layer_count;
             if (L >= MAX_LAYERS) L = MAX_LAYERS - 1;
+            state->system_mode = MODE_OVERDUB;
+            state->prev_mode = mode;
             lock_release(save);
 
             start_recording(state, L);
@@ -339,12 +345,14 @@ static void handle_key_press(uint8_t key, shared_state_t *state) {
         if (mode == MODE_IDLE || mode == MODE_PLAYING) {
             save = lock_acquire();
             state->system_mode = MODE_PLAYING;
+            state->prev_mode = mode;
             lock_release(save);
             printf("Keypad: -> PLAYING\n");
         } else if (mode == MODE_OVERDUB) {
             finalize_recording(state);
             save = lock_acquire();
             state->system_mode = MODE_PLAYING;
+            state->prev_mode = mode;
             lock_release(save);
             printf("Keypad: OVERDUB -> PLAYING\n");
         }
@@ -358,6 +366,7 @@ static void handle_key_press(uint8_t key, shared_state_t *state) {
         }
         save = lock_acquire();
         state->system_mode         = MODE_IDLE;
+        state->prev_mode = mode;
         state->current_note        = NOTE_NONE;
         state->in_instrument_select = 0;
         lock_release(save);
@@ -371,6 +380,8 @@ static void handle_key_press(uint8_t key, shared_state_t *state) {
         if (mode == MODE_IDLE) {
             save = lock_acquire();
             state->in_instrument_select = 1;
+            state->prev_instrument = 0;
+            state->prev_mode = mode;
             lock_release(save);
             printf("Keypad: enter instrument select\n");
             leds_dirty = true;

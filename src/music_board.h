@@ -107,8 +107,10 @@ typedef struct {
     volatile uint8_t  current_waveform; // waveform_t
 
     volatile uint8_t  system_mode; // system_mode_t
+    volatile uint8_t  prev_mode;
     volatile uint8_t  active_loop; // 0 or 1
     volatile uint8_t  in_instrument_select;
+    volatile uint8_t  prev_instrument;
 
     // Loop data
     loop_t loops[NUM_LOOPS];

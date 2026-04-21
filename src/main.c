@@ -26,10 +26,10 @@ void core1_audio_main(void) {
     // 3. If system_mode == MODE_PLAYING, iterate through loop_data
     // 4. Mix multiple layers if overdub
     //
-    // audio_init();
-    // while (true) {
-    //     audio_update(&shared_state);
-    // }
+    audio_init();
+    while (true) {
+        audio_update(&shared_state);
+    }
 }
  
 // CORE 0 FOR EVERYONE ELSE
@@ -44,8 +44,10 @@ int main(void) {
     shared_state.current_note = NOTE_NONE;
     shared_state.current_waveform = WAVE_SINE;
     shared_state.system_mode = MODE_IDLE;
+    shared_state.prev_mode = MODE_IDLE;
     shared_state.active_loop = 0;
     shared_state.in_instrument_select = 0;
+    shared_state.prev_instrument = 0;
  
     // INITS
  
@@ -71,6 +73,8 @@ int main(void) {
  
         // Chris: update display based on shared_state
         display_update(&shared_state);
+        shared_state.prev_mode = shared_state.system_mode;
+        shared_state.prev_instrument = shared_state.in_instrument_select;
  
         // Geetika: if recording mic, sample ADC
         // if (shared_state.system_mode == MODE_RECORDING) {

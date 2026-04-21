@@ -68,8 +68,8 @@ extern lcd_dev_t lcddev;
 #define LGRAYBLUE   0XA651
 #define LBBLUE      0X2B12
 
-void display_update(&shared_state_t state);
-void init_spilcd(void);
+void display_update(shared_state_t *state);
+void init_spi_lcd(void);
 void LCD_Setup(void);
 void LCD_Init(void (*reset)(int), void (*select)(int), void (*reg_select)(int));
 void LCD_Clear(u16 Color);
