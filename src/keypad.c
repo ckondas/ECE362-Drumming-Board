@@ -1,11 +1,15 @@
-// keypad.c — Adafruit NeoTrellis driver for the RP2350 (Purdue Proton board)
+// keypad.c — Adafruit NeoTrellis driver
 //
 // SDA=GP2, SCL=GP3
 //
+// IDLE  --(1)--> RECORD
+// IDLE  --(2)--> PLAY
+// IDLE  --(3)--> IDLE
 // IDLE <--(4)--> INSTRUMENT_SELECT (sub-mode, flag in shared_state)
-// IDLE  --(1)--> RECORD  --(3)--> IDLE
-// IDLE  --(2)--> PLAY    --(3)--> IDLE
-// PLAY  --(1)--> OVERDUB --(2)--> PLAY
+// PLAY  --(1)--> OVERDUB
+// PLAY  --(2)--> PLAY
+// PLAY  --(3)--> IDLE
+// RECORD --(1)--> OVERDUB (commit current layer, start next)
 // OVERDUB --(1)--> OVERDUB (commit current layer, start next)
 // OVERDUB --(3)--> IDLE
 //
