@@ -61,7 +61,8 @@ typedef enum {
   WAVE_SQUARE   = 1,
   WAVE_SAW      = 2,
   WAVE_TRIANGLE = 3,
-  WAVE_COUNT    = 4
+  WAVE_MIC      = 4,
+  WAVE_COUNT    = 5
 } waveform_t;
 
 // SYSTEM STATE
@@ -97,6 +98,7 @@ typedef struct {
 
     volatile uint8_t  system_mode; // system_mode_t
     volatile uint8_t  active_loop; // 0 or 1
+    volatile uint8_t  in_instrument_select;
 
     // Loop data
     loop_t loops[NUM_LOOPS];

@@ -42,6 +42,7 @@ int main(void) {
     shared_state.current_waveform = WAVE_SINE;
     shared_state.system_mode = MODE_IDLE;
     shared_state.active_loop = 0;
+    shared_state.in_instrument_select = 0;
  
     // INITS
  
