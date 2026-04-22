@@ -5,11 +5,13 @@
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
 #include "hardware/sync.h"
+#include "hardware/spi.h"
+#include "hardware/dma.h"
 #include "music_board.h"
 #include "keypad.h"
-// #include "display.h"   // Chris
+#include "lcd.h"   // Chris
 #include "audio.h"     // Julia
-// #include "mic.h"       // Geetika
+#include "mic.h"       // Geetika
  
 shared_state_t shared_state;
  
@@ -24,17 +26,28 @@ void core1_audio_main(void) {
     // 4. Mix multiple layers if overdub
     //
     audio_init();
-    while (true) {
-        if (shared_state.current_note == NOTE_NONE) {
-            set_freq(0, 0.0f);
-            // WavPwmPlayAudio(AudioBuffer);
+    playback_reset();
+    while (true) { 
+        if (shared_state.system_mode == MODE_PLAYING) { 
+            if (shared_state.current_waveform == WAVE_MIC) { 
+                mic_playback_stop(); 
+                if (!dma_channel_is_busy(mic_dma_ch)) 
+                mic_playback_start(); 
+            } 
+            else { 
+                mic_playback_stop(); 
+                playback_tick(); 
+            } 
         } 
-        else {
-            // set_freq(0, note_freq[shared_state.current_note]);
-            set_freq(0, 440.0f);
-        }
-
-        sleep_ms(1);
+        else { 
+            mic_playback_stop(); 
+            if (shared_state.current_note == NOTE_NONE) { 
+                set_freq(0, 0.0f); 
+                set_freq(1, 0.0f); 
+            } else { 
+                set_freq(0, note_freq[shared_state.current_note]); 
+            } 
+        } sleep_ms(1);
     }
 }
  
@@ -62,10 +75,12 @@ int main(void) {
     }
  
     // Chris: LCD
-    // display_init();
+    init_spi_lcd();
+    LCD_Setup();
+    LCD_Clear(BLACK);
  
     // Geetika: Mic
-    // mic_init();
+    mic_init();
  
     multicore_launch_core1(core1_audio_main);
  
@@ -74,12 +89,14 @@ int main(void) {
         keypad_poll(&shared_state);
  
         // Chris: update display based on shared_state
-        // display_update(&shared_state);
+        display_update(&shared_state);
+        shared_state.prev_mode = shared_state.system_mode;
+        shared_state.prev_instrument = shared_state.in_instrument_select;
  
         // Geetika: if recording mic, sample ADC
-        // if (shared_state.system_mode == MODE_RECORDING) {
-        //     mic_sample(&shared_state);
-        // }
+        if (shared_state.system_mode == MODE_RECORDING) {
+            mic_capture(&shared_state);
+        }
  
         sleep_ms(10);  // ~100Hz poll rate
     }
