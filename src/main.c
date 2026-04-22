@@ -11,10 +11,10 @@
 #include "music_board.h"
 #include "keypad.h"
 #include "lcd.h"   // Chris
-// #include "audio.h"     // Julia
-// #include "mic.h"       // Geetika
+#include "audio.h"     // Julia
+#include "mic.h"       // Geetika
  
-static shared_state_t shared_state;
+shared_state_t shared_state;
  
 // CORE 1 FOR JULIA
  
@@ -27,8 +27,51 @@ void core1_audio_main(void) {
     // 4. Mix multiple layers if overdub
     //
     audio_init();
+
+    playback_reset();
+
     while (true) {
-        audio_update(&shared_state);
+
+        if (shared_state.system_mode == MODE_PLAYING) {
+
+            // Loop playback drives frequency
+
+            playback_tick();
+
+        } else {
+
+            // Live playing: play the current held note
+
+            if (shared_state.current_note == NOTE_NONE) {
+
+                set_freq(0, 0.0f);
+
+                set_freq(1, 0.0f);
+
+            } else {
+
+                set_freq(0, note_freq[shared_state.current_note]);
+
+            }
+
+        }
+
+ 
+
+        // Check if DMA mic recording has finished
+
+        // if (shared_state.system_mode == MODE_RECORDING && !mic_is_capturing()) {
+
+        //     mic_stop_capture();
+
+        //     shared_state.system_mode = MODE_IDLE;
+
+        // }
+
+ 
+
+        sleep_ms(1);
+
     }
 }
  
@@ -77,9 +120,9 @@ int main(void) {
         shared_state.prev_instrument = shared_state.in_instrument_select;
  
         // Geetika: if recording mic, sample ADC
-        // if (shared_state.system_mode == MODE_RECORDING) {
-        //     mic_sample(&shared_state);
-        // }
+        if (shared_state.system_mode == MODE_RECORDING) {
+            mic_capture(&shared_state);
+        }
  
         sleep_ms(10);  // ~100Hz poll rate
     }
